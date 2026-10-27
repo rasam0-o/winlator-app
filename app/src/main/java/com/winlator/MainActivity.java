@@ -35,7 +35,6 @@ import com.winlator.container.ContainerManager;
 import com.winlator.contentdialog.AboutDialog;
 import com.winlator.core.AppUtils;
 import com.winlator.core.Callback;
-import com.winlator.core.FileUtils;
 import com.winlator.core.LocaleHelper;
 import com.winlator.core.PreloaderDialog;
 import com.winlator.xenvironment.RootFSInstaller;
@@ -373,7 +372,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             toast("No game .exe file found here");
         }
         else if (executables.size() == 1) {
-            addGameShortcut(executables.get(0).getPath());
+            launchGame(executables.get(0).getPath());
         }
         else {
             String[] names = new String[executables.size()];
@@ -385,7 +384,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
             new AlertDialog.Builder(this)
                 .setTitle("Choose the game's .exe")
-                .setItems(names, (dialog, which) -> addGameShortcut(executables.get(which).getPath()))
+                .setItems(names, (dialog, which) -> launchGame(executables.get(which).getPath()))
                 .show();
         }
     }
@@ -402,10 +401,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             toast("Please choose the game's .exe file");
             return;
         }
-        addGameShortcut(path);
+        launchGame(path);
     }
 
-    private void addGameShortcut(String path) {
+    private void launchGame(String path) {
         Container container = null;
         for (Container c : (new ContainerManager(this)).getContainers()) {
             container = c;
@@ -416,38 +415,9 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             return;
         }
 
-        String internal = Environment.getExternalStorageDirectory().getPath();
-        String downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getPath();
-
-        String dosPath;
-        if (path.startsWith(downloads + "/")) {
-            dosPath = "D:" + path.substring(downloads.length()).replace('/', '\\');
-        }
-        else if (path.startsWith(internal + "/")) {
-            dosPath = "E:" + path.substring(internal.length()).replace('/', '\\');
-        }
-        else {
-            toast("Please choose a file from the phone's internal storage");
-            return;
-        }
-
-        String baseName = new File(path).getName();
-        int dotIndex = baseName.lastIndexOf('.');
-        if (dotIndex > 0) baseName = baseName.substring(0, dotIndex);
-        String safeName = baseName.replaceAll("[\\\\/:*?\"<>|]", "_");
-
-        String escapedPath = dosPath.replace("\\", "\\\\\\\\").replace(" ", "\\\\ ");
-        String content = "[Desktop Entry]\n" +
-            "Name=" + safeName + "\n" +
-            "Exec=env WINEPREFIX=\"/home/xuser/.wine\" wine " + escapedPath + "\n" +
-            "Type=Application\n" +
-            "StartupNotify=true\n";
-
-        File desktopDir = new File(container.getUserDir(), "Desktop");
-        desktopDir.mkdirs();
-        FileUtils.writeString(new File(desktopDir, safeName + ".desktop"), content);
-
-        toast("Game added: " + safeName);
-        showFragment(new ShortcutsFragment());
+        Intent intent = new Intent(this, XServerDisplayActivity.class);
+        intent.putExtra("container_id", container.id);
+        intent.putExtra("exec_path", path);
+        startActivity(intent);
     }
 }
