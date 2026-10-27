@@ -9,7 +9,11 @@ import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.DocumentsContract;
+import android.view.Menu;
 import android.view.MenuItem;
+import android.widget.Toast;
 
 import androidx.annotation.IntRange;
 import androidx.annotation.NonNull;
@@ -25,12 +29,17 @@ import androidx.fragment.app.FragmentManager;
 import androidx.preference.PreferenceManager;
 
 import com.google.android.material.navigation.NavigationView;
+import com.winlator.container.Container;
+import com.winlator.container.ContainerManager;
 import com.winlator.contentdialog.AboutDialog;
 import com.winlator.core.AppUtils;
 import com.winlator.core.Callback;
+import com.winlator.core.FileUtils;
 import com.winlator.core.LocaleHelper;
 import com.winlator.core.PreloaderDialog;
 import com.winlator.xenvironment.RootFSInstaller;
+
+import java.io.File;
 
 public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener {
     public static final boolean DEBUG_MODE = false; // FIXME change to false
@@ -39,6 +48,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     public static final byte OPEN_FILE_REQUEST_CODE = 2;
     public static final byte EDIT_INPUT_CONTROLS_REQUEST_CODE = 3;
     public static final byte OPEN_DIRECTORY_REQUEST_CODE = 4;
+    public static final byte IMPORT_GAME_REQUEST_CODE = 5;
+    private static final int MENU_IMPORT_GAMES = 9001;
     private DrawerLayout drawerLayout;
     public final PreloaderDialog preloaderDialog = new PreloaderDialog(this);
     private boolean editInputControls = false;
@@ -56,6 +67,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         drawerLayout = findViewById(R.id.DrawerLayout);
         NavigationView navigationView = findViewById(R.id.NavigationView);
         navigationView.setNavigationItemSelectedListener(this);
+        navigationView.getMenu().add(Menu.NONE, MENU_IMPORT_GAMES, 0, "Import PC games");
 
         setSupportActionBar(findViewById(R.id.Toolbar));
         ActionBar actionBar = getSupportActionBar();
@@ -113,6 +125,9 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 openFileCallback.call(data.getData());
                 openFileCallback = null;
             }
+        }
+        else if (requestCode == IMPORT_GAME_REQUEST_CODE && resultCode == Activity.RESULT_OK && data != null) {
+            importGame(data.getData());
         }
     }
 
@@ -180,6 +195,12 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     @Override
     public boolean onNavigationItemSelected(@NonNull MenuItem item) {
+        if (item.getItemId() == MENU_IMPORT_GAMES) {
+            drawerLayout.closeDrawer(GravityCompat.START);
+            startImportGame();
+            return true;
+        }
+
         FragmentManager fragmentManager = getSupportFragmentManager();
         if (fragmentManager.getBackStackEntryCount() > 0) {
             fragmentManager.popBackStack(null, FragmentManager.POP_BACK_STACK_INCLUSIVE);
@@ -215,5 +236,95 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
         drawerLayout.closeDrawer(GravityCompat.START);
         currentFragment = fragment;
+    }
+
+    // ---------- Import PC games ----------
+
+    private void startImportGame() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        startActivityForResult(intent, IMPORT_GAME_REQUEST_CODE);
+    }
+
+    private String uriToPath(Uri uri) {
+        try {
+            if (!DocumentsContract.isDocumentUri(this, uri)) return null;
+            String docId = DocumentsContract.getDocumentId(uri);
+            if (docId.startsWith("raw:")) return docId.substring(4);
+
+            if ("com.android.externalstorage.documents".equals(uri.getAuthority())) {
+                String[] parts = docId.split(":", 2);
+                if (parts.length == 2 && parts[0].equalsIgnoreCase("primary")) {
+                    return Environment.getExternalStorageDirectory().getPath() + "/" + parts[1];
+                }
+            }
+        }
+        catch (Exception e) {}
+        return null;
+    }
+
+    private void toast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+    }
+
+    private void importGame(Uri uri) {
+        if (uri == null) return;
+
+        String path = uriToPath(uri);
+        if (path == null) {
+            toast("Could not read this file location. Pick it from 'Internal storage' in the file picker.");
+            return;
+        }
+
+        String lowerPath = path.toLowerCase();
+        if (!lowerPath.endsWith(".exe") && !lowerPath.endsWith(".bat")) {
+            toast("Please choose the game's .exe file");
+            return;
+        }
+
+        Container container = null;
+        for (Container c : (new ContainerManager(this)).getContainers()) {
+            container = c;
+            break;
+        }
+        if (container == null) {
+            toast("Create a container first (Containers tab, + button)");
+            return;
+        }
+
+        String internal = Environment.getExternalStorageDirectory().getPath();
+        String downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getPath();
+
+        String dosPath;
+        if (path.startsWith(downloads + "/")) {
+            dosPath = "D:" + path.substring(downloads.length()).replace('/', '\\');
+        }
+        else if (path.startsWith(internal + "/")) {
+            dosPath = "E:" + path.substring(internal.length()).replace('/', '\\');
+        }
+        else {
+            toast("Please choose a file from the phone's internal storage");
+            return;
+        }
+
+        String baseName = new File(path).getName();
+        int dotIndex = baseName.lastIndexOf('.');
+        if (dotIndex > 0) baseName = baseName.substring(0, dotIndex);
+        String safeName = baseName.replaceAll("[\\\\/:*?\"<>|]", "_");
+
+        String escapedPath = dosPath.replace("\\", "\\\\\\\\").replace(" ", "\\\\ ");
+        String content = "[Desktop Entry]\n" +
+            "Name=" + safeName + "\n" +
+            "Exec=env WINEPREFIX=\"/home/xuser/.wine\" wine " + escapedPath + "\n" +
+            "Type=Application\n" +
+            "StartupNotify=true\n";
+
+        File desktopDir = new File(container.getUserDir(), "Desktop");
+        desktopDir.mkdirs();
+        FileUtils.writeString(new File(desktopDir, safeName + ".desktop"), content);
+
+        toast("Game added: " + safeName);
+        showFragment(new ShortcutsFragment());
     }
 }
