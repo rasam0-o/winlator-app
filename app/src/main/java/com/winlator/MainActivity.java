@@ -40,8 +40,12 @@ import com.winlator.core.PreloaderDialog;
 import com.winlator.xenvironment.RootFSInstaller;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.PrintWriter;
+import java.io.RandomAccessFile;
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -107,6 +111,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 showFragment(new ContainerFileManagerFragment(containerId, startPath));
             }
         }
+
+        setupCrashLogger();
     }
 
     @Override
@@ -135,9 +141,14 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             }
         }
         else if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
-            if (requestCode == IMPORT_GAME_REQUEST_CODE) importGame(data.getData());
-            else if (requestCode == IMPORT_ZIP_REQUEST_CODE) importZip(data.getData());
-            else if (requestCode == IMPORT_FOLDER_REQUEST_CODE) importFolder(data.getData());
+            try {
+                if (requestCode == IMPORT_GAME_REQUEST_CODE) importGame(data.getData());
+                else if (requestCode == IMPORT_ZIP_REQUEST_CODE) importZip(data.getData());
+                else if (requestCode == IMPORT_FOLDER_REQUEST_CODE) importFolder(data.getData());
+            }
+            catch (Throwable e) {
+                showMessage("Import error", String.valueOf(e));
+            }
         }
     }
 
@@ -248,6 +259,45 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         currentFragment = fragment;
     }
 
+    // ---------- Crash logger (for debugging) ----------
+
+    private void setupCrashLogger() {
+        final File logFile = new File(getFilesDir(), "crash_log.txt");
+        final Thread.UncaughtExceptionHandler oldHandler = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            try {
+                StringWriter sw = new StringWriter();
+                throwable.printStackTrace(new PrintWriter(sw));
+                FileOutputStream fos = new FileOutputStream(logFile);
+                fos.write(sw.toString().getBytes());
+                fos.close();
+            }
+            catch (Exception e) {}
+            if (oldHandler != null) oldHandler.uncaughtException(thread, throwable);
+        });
+
+        if (logFile.isFile()) {
+            try {
+                byte[] bytes = new byte[(int)logFile.length()];
+                FileInputStream fis = new FileInputStream(logFile);
+                fis.read(bytes);
+                fis.close();
+                String text = new String(bytes);
+                logFile.delete();
+                showMessage("Last crash report", text.substring(0, Math.min(1800, text.length())));
+            }
+            catch (Exception e) {}
+        }
+    }
+
+    private void showMessage(String title, String message) {
+        new AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show();
+    }
+
     // ---------- Import PC games ----------
 
     private void startImportGame() {
@@ -296,13 +346,13 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     private void importFolder(Uri uri) {
         String path = uriToPath(uri, true);
         if (path == null) {
-            toast("Could not read this folder. Pick a folder from 'Internal storage'.");
+            showMessage("Import", "Could not read this folder location:\n" + uri + "\n\nPick a folder from 'Internal storage'.");
             return;
         }
 
         File dir = new File(path);
         if (!dir.isDirectory()) {
-            toast("Folder not found");
+            showMessage("Import", "Folder not found:\n" + path);
             return;
         }
         chooseExecutable(dir);
@@ -337,13 +387,13 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                     }
                 }
             }
-            catch (Exception e) {
-                error = String.valueOf(e.getMessage());
+            catch (Throwable e) {
+                error = String.valueOf(e);
             }
 
             final String finalError = error;
             runOnUiThread(() -> {
-                if (finalError != null) toast("Extract failed: " + finalError);
+                if (finalError != null) showMessage("Extract failed", finalError);
                 else chooseExecutable(targetDir);
             });
         }).start();
@@ -369,7 +419,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         findExecutables(gameDir, executables, 0);
 
         if (executables.isEmpty()) {
-            toast("No game .exe file found here");
+            showMessage("Import", "No game .exe file found in:\n" + gameDir.getPath());
         }
         else if (executables.size() == 1) {
             launchGame(executables.get(0).getPath());
@@ -392,16 +442,32 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     private void importGame(Uri uri) {
         String path = uriToPath(uri, false);
         if (path == null) {
-            toast("Could not read this file location. Pick it from 'Internal storage'.");
+            showMessage("Import", "Could not read this file location:\n" + uri + "\n\nPick it from 'Internal storage'.");
             return;
         }
 
         String lowerPath = path.toLowerCase();
         if (!lowerPath.endsWith(".exe") && !lowerPath.endsWith(".bat")) {
-            toast("Please choose the game's .exe file");
+            showMessage("Import", "Please choose the game's .exe file.\nYou picked:\n" + path);
             return;
         }
         launchGame(path);
+    }
+
+    private String peMachineType(File file) {
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            raf.seek(0x3C);
+            int peOffset = Integer.reverseBytes(raf.readInt());
+            raf.seek(peOffset + 4);
+            int machine = Short.reverseBytes(raf.readShort()) & 0xFFFF;
+            if (machine == 0x8664) return "64-bit (x64) - OK";
+            if (machine == 0x14c) return "32-bit (x86) - OK";
+            if (machine == 0xAA64) return "ARM64 - NOT supported by the engine!";
+            return "unknown (0x" + Integer.toHexString(machine) + ")";
+        }
+        catch (Exception e) {
+            return "unreadable: " + e;
+        }
     }
 
     private void launchGame(String path) {
@@ -411,13 +477,33 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             break;
         }
         if (container == null) {
-            toast("Create a container first (Containers tab, + button)");
+            showMessage("Import", "Create a container first (Containers tab, + button).");
             return;
         }
 
-        Intent intent = new Intent(this, XServerDisplayActivity.class);
-        intent.putExtra("container_id", container.id);
-        intent.putExtra("exec_path", path);
-        startActivity(intent);
+        final Container targetContainer = container;
+        final File exe = new File(path);
+        String info = "File: " + path +
+            "\nExists: " + exe.isFile() +
+            "\nSize: " + (exe.length() / 1024) + " KB" +
+            "\nType: " + peMachineType(exe) +
+            "\nContainer: " + container.id;
+
+        new AlertDialog.Builder(this)
+            .setTitle("Launching game")
+            .setMessage(info)
+            .setPositiveButton("Run", (dialog, which) -> {
+                try {
+                    Intent intent = new Intent(MainActivity.this, XServerDisplayActivity.class);
+                    intent.putExtra("container_id", targetContainer.id);
+                    intent.putExtra("exec_path", path);
+                    startActivity(intent);
+                }
+                catch (Throwable e) {
+                    showMessage("Launch error", String.valueOf(e));
+                }
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
     }
 }
