@@ -19,6 +19,7 @@ import androidx.annotation.IntRange;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.ActionBar;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -40,6 +41,12 @@ import com.winlator.core.PreloaderDialog;
 import com.winlator.xenvironment.RootFSInstaller;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener {
     public static final boolean DEBUG_MODE = false; // FIXME change to false
@@ -49,6 +56,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     public static final byte EDIT_INPUT_CONTROLS_REQUEST_CODE = 3;
     public static final byte OPEN_DIRECTORY_REQUEST_CODE = 4;
     public static final byte IMPORT_GAME_REQUEST_CODE = 5;
+    public static final byte IMPORT_ZIP_REQUEST_CODE = 6;
+    public static final byte IMPORT_FOLDER_REQUEST_CODE = 7;
     private static final int MENU_IMPORT_GAMES = 9001;
     private DrawerLayout drawerLayout;
     public final PreloaderDialog preloaderDialog = new PreloaderDialog(this);
@@ -126,8 +135,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 openFileCallback = null;
             }
         }
-        else if (requestCode == IMPORT_GAME_REQUEST_CODE && resultCode == Activity.RESULT_OK && data != null) {
-            importGame(data.getData());
+        else if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+            if (requestCode == IMPORT_GAME_REQUEST_CODE) importGame(data.getData());
+            else if (requestCode == IMPORT_ZIP_REQUEST_CODE) importZip(data.getData());
+            else if (requestCode == IMPORT_FOLDER_REQUEST_CODE) importFolder(data.getData());
         }
     }
 
@@ -241,39 +252,148 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     // ---------- Import PC games ----------
 
     private void startImportGame() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        startActivityForResult(intent, IMPORT_GAME_REQUEST_CODE);
-    }
-
-    private String uriToPath(Uri uri) {
-        try {
-            if (!DocumentsContract.isDocumentUri(this, uri)) return null;
-            String docId = DocumentsContract.getDocumentId(uri);
-            if (docId.startsWith("raw:")) return docId.substring(4);
-
-            if ("com.android.externalstorage.documents".equals(uri.getAuthority())) {
-                String[] parts = docId.split(":", 2);
-                if (parts.length == 2 && parts[0].equalsIgnoreCase("primary")) {
-                    return Environment.getExternalStorageDirectory().getPath() + "/" + parts[1];
+        String[] options = {"Game folder", "ZIP file (auto extract)", "EXE file"};
+        new AlertDialog.Builder(this)
+            .setTitle("Import PC games")
+            .setItems(options, (dialog, which) -> {
+                if (which == 0) {
+                    startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), IMPORT_FOLDER_REQUEST_CODE);
                 }
-            }
-        }
-        catch (Exception e) {}
-        return null;
+                else {
+                    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("*/*");
+                    startActivityForResult(intent, which == 1 ? IMPORT_ZIP_REQUEST_CODE : IMPORT_GAME_REQUEST_CODE);
+                }
+            })
+            .show();
     }
 
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
-    private void importGame(Uri uri) {
-        if (uri == null) return;
+    private String docIdToPath(String docId) {
+        if (docId == null) return null;
+        if (docId.startsWith("raw:")) return docId.substring(4);
+        String[] parts = docId.split(":", 2);
+        if (parts.length == 2 && parts[0].equalsIgnoreCase("primary")) {
+            return Environment.getExternalStorageDirectory().getPath() + "/" + parts[1];
+        }
+        return null;
+    }
 
-        String path = uriToPath(uri);
+    private String uriToPath(Uri uri, boolean isTree) {
+        try {
+            if (isTree) return docIdToPath(DocumentsContract.getTreeDocumentId(uri));
+            if (!DocumentsContract.isDocumentUri(this, uri)) return null;
+            return docIdToPath(DocumentsContract.getDocumentId(uri));
+        }
+        catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void importFolder(Uri uri) {
+        String path = uriToPath(uri, true);
         if (path == null) {
-            toast("Could not read this file location. Pick it from 'Internal storage' in the file picker.");
+            toast("Could not read this folder. Pick a folder from 'Internal storage'.");
+            return;
+        }
+
+        File dir = new File(path);
+        if (!dir.isDirectory()) {
+            toast("Folder not found");
+            return;
+        }
+        chooseExecutable(dir);
+    }
+
+    private void importZip(Uri uri) {
+        String zipPath = uriToPath(uri, false);
+        String name = zipPath != null ? new File(zipPath).getName() : "game";
+        String folderName = name.replaceAll("(?i)\\.zip$", "").replaceAll("[\\\\/:*?\"<>|]", "_");
+        final File targetDir = new File(Environment.getExternalStorageDirectory(), "WinlatorGames/" + folderName);
+
+        toast("Extracting, please wait...");
+        new Thread(() -> {
+            String error = null;
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 ZipInputStream zis = new ZipInputStream(in)) {
+                targetDir.mkdirs();
+                String basePath = targetDir.getCanonicalPath() + File.separator;
+                byte[] buffer = new byte[65536];
+                ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    File out = new File(targetDir, entry.getName());
+                    if (!out.getCanonicalPath().startsWith(basePath)) continue;
+                    if (entry.isDirectory()) {
+                        out.mkdirs();
+                        continue;
+                    }
+                    out.getParentFile().mkdirs();
+                    try (FileOutputStream fos = new FileOutputStream(out)) {
+                        int count;
+                        while ((count = zis.read(buffer)) > 0) fos.write(buffer, 0, count);
+                    }
+                }
+            }
+            catch (Exception e) {
+                error = String.valueOf(e.getMessage());
+            }
+
+            final String finalError = error;
+            runOnUiThread(() -> {
+                if (finalError != null) toast("Extract failed: " + finalError);
+                else chooseExecutable(targetDir);
+            });
+        }).start();
+    }
+
+    private void findExecutables(File dir, List<File> result, int depth) {
+        File[] files = dir.listFiles();
+        if (files == null || depth > 4) return;
+        for (File file : files) {
+            String name = file.getName().toLowerCase();
+            if (file.isDirectory()) {
+                if (!name.contains("redist") && !name.equals("directx")) findExecutables(file, result, depth + 1);
+            }
+            else if (name.endsWith(".exe") && !name.contains("unins") && !name.contains("setup") &&
+                !name.contains("vcredist") && !name.contains("crash")) {
+                result.add(file);
+            }
+        }
+    }
+
+    private void chooseExecutable(File gameDir) {
+        final List<File> executables = new ArrayList<>();
+        findExecutables(gameDir, executables, 0);
+
+        if (executables.isEmpty()) {
+            toast("No game .exe file found here");
+        }
+        else if (executables.size() == 1) {
+            addGameShortcut(executables.get(0).getPath());
+        }
+        else {
+            String[] names = new String[executables.size()];
+            int prefixLength = gameDir.getPath().length() + 1;
+            for (int i = 0; i < names.length; i++) {
+                String fullPath = executables.get(i).getPath();
+                names[i] = fullPath.length() > prefixLength ? fullPath.substring(prefixLength) : fullPath;
+            }
+
+            new AlertDialog.Builder(this)
+                .setTitle("Choose the game's .exe")
+                .setItems(names, (dialog, which) -> addGameShortcut(executables.get(which).getPath()))
+                .show();
+        }
+    }
+
+    private void importGame(Uri uri) {
+        String path = uriToPath(uri, false);
+        if (path == null) {
+            toast("Could not read this file location. Pick it from 'Internal storage'.");
             return;
         }
 
@@ -282,7 +402,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             toast("Please choose the game's .exe file");
             return;
         }
+        addGameShortcut(path);
+    }
 
+    private void addGameShortcut(String path) {
         Container container = null;
         for (Container c : (new ContainerManager(this)).getContainers()) {
             container = c;
