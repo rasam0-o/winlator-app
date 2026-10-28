@@ -13,6 +13,7 @@ import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.View;
 import android.widget.Toast;
 
 import androidx.annotation.IntRange;
@@ -62,6 +63,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     public static final byte IMPORT_ZIP_REQUEST_CODE = 6;
     public static final byte IMPORT_FOLDER_REQUEST_CODE = 7;
     private static final int MENU_IMPORT_GAMES = 9001;
+    private static final int MENU_HOME = 9002;
     private DrawerLayout drawerLayout;
     public final PreloaderDialog preloaderDialog = new PreloaderDialog(this);
     private boolean editInputControls = false;
@@ -79,7 +81,17 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         drawerLayout = findViewById(R.id.DrawerLayout);
         NavigationView navigationView = findViewById(R.id.NavigationView);
         navigationView.setNavigationItemSelectedListener(this);
-        navigationView.getMenu().add(Menu.NONE, MENU_IMPORT_GAMES, 0, "Import PC games");
+        navigationView.getMenu().add(Menu.NONE, MENU_HOME, 0, "Home");
+        navigationView.getMenu().add(Menu.NONE, MENU_IMPORT_GAMES, 1, "Import PC games");
+
+        drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
+            @Override
+            public void onDrawerClosed(View drawerView) {
+                if (currentFragment instanceof LauncherFragment) {
+                    drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_LOCKED_CLOSED);
+                }
+            }
+        });
 
         setSupportActionBar(findViewById(R.id.Toolbar));
         ActionBar actionBar = getSupportActionBar();
@@ -96,13 +108,15 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             navigationView.setCheckedItem(R.id.menu_item_input_controls);
         }
         else {
-            boolean showShortcutsFirst = preferences.getBoolean("show_shortcuts_first", false);
             int selectedMenuItemId = intent.getIntExtra("selected_menu_item_id", 0);
-            int menuItemId = selectedMenuItemId > 0 ? selectedMenuItemId : (showShortcutsFirst ? R.id.menu_item_shortcuts : R.id.menu_item_containers);
 
             actionBar.setHomeAsUpIndicator(R.drawable.icon_action_bar_menu);
-            onNavigationItemSelected(navigationView.getMenu().findItem(menuItemId));
-            navigationView.setCheckedItem(menuItemId);
+            if (selectedMenuItemId > 0) {
+                onNavigationItemSelected(navigationView.getMenu().findItem(selectedMenuItemId));
+                navigationView.setCheckedItem(selectedMenuItemId);
+            }
+            else showFragment(new LauncherFragment());
+
             if (!requestAppPermissions()) RootFSInstaller.installIfNeeded(this);
 
             int containerId = intent.getIntExtra("container_id", 0);
@@ -163,17 +177,17 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     @Override
     public void onBackPressed() {
-        if (currentFragment != null && currentFragment.isVisible()) {
-            if (currentFragment instanceof BaseFileManagerFragment) {
-                BaseFileManagerFragment fileManagerFragment = (BaseFileManagerFragment)currentFragment;
-                if (fileManagerFragment.onBackPressed()) return;
-            }
-            else if (currentFragment instanceof ContainersFragment) {
-                finish();
-            }
+        if (currentFragment instanceof LauncherFragment) {
+            finish();
+            return;
         }
 
-        showFragment(new ContainersFragment());
+        if (currentFragment != null && currentFragment.isVisible() && currentFragment instanceof BaseFileManagerFragment) {
+            BaseFileManagerFragment fileManagerFragment = (BaseFileManagerFragment)currentFragment;
+            if (fileManagerFragment.onBackPressed()) return;
+        }
+
+        showFragment(new LauncherFragment());
     }
 
     public void setOpenFileCallback(Callback<Uri> openFileCallback) {
@@ -221,6 +235,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             startImportGame();
             return true;
         }
+        if (item.getItemId() == MENU_HOME) {
+            showFragment(new LauncherFragment());
+            return true;
+        }
 
         FragmentManager fragmentManager = getSupportFragmentManager();
         if (fragmentManager.getBackStackEntryCount() > 0) {
@@ -255,8 +273,23 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             .replace(R.id.FLFragmentContainer, fragment)
             .commit();
 
+        ActionBar actionBar = getSupportActionBar();
+        if (fragment instanceof LauncherFragment) {
+            if (actionBar != null) actionBar.hide();
+            drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_LOCKED_CLOSED);
+        }
+        else {
+            if (actionBar != null) actionBar.show();
+            drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_UNLOCKED);
+        }
+
         drawerLayout.closeDrawer(GravityCompat.START);
         currentFragment = fragment;
+    }
+
+    public void openAdvancedMenu() {
+        drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_UNLOCKED);
+        drawerLayout.openDrawer(GravityCompat.START);
     }
 
     // ---------- Crash logger (for debugging) ----------
@@ -300,7 +333,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     // ---------- Import PC games ----------
 
-    private void startImportGame() {
+    public void startImportGame() {
         String[] options = {"Game folder", "ZIP file (auto extract)", "EXE file"};
         new AlertDialog.Builder(this)
             .setTitle("Import PC games")
@@ -362,7 +395,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         String zipPath = uriToPath(uri, false);
         String name = zipPath != null ? new File(zipPath).getName() : "game";
         String folderName = name.replaceAll("(?i)\\.zip$", "").replaceAll("[\\\\/:*?\"<>|]", "_");
-        final File targetDir = new File(Environment.getExternalStorageDirectory(), "WinlatorGames/" + folderName);
+        final File targetDir = new File(Environment.getExternalStorageDirectory(), "GameBox/" + folderName);
 
         toast("Extracting, please wait...");
         new Thread(() -> {
@@ -422,7 +455,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             showMessage("Import", "No game .exe file found in:\n" + gameDir.getPath());
         }
         else if (executables.size() == 1) {
-            launchGame(executables.get(0).getPath());
+            addToLibrary(executables.get(0).getPath());
         }
         else {
             String[] names = new String[executables.size()];
@@ -434,7 +467,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
             new AlertDialog.Builder(this)
                 .setTitle("Choose the game's .exe")
-                .setItems(names, (dialog, which) -> launchGame(executables.get(which).getPath()))
+                .setItems(names, (dialog, which) -> addToLibrary(executables.get(which).getPath()))
                 .show();
         }
     }
@@ -451,7 +484,17 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             showMessage("Import", "Please choose the game's .exe file.\nYou picked:\n" + path);
             return;
         }
-        launchGame(path);
+        addToLibrary(path);
+    }
+
+    private void addToLibrary(String path) {
+        boolean added = LauncherFragment.addGame(this, path);
+        toast(added ? "Game added to your library" : "This game is already in your library");
+
+        if (currentFragment instanceof LauncherFragment) {
+            ((LauncherFragment)currentFragment).refresh();
+        }
+        else showFragment(new LauncherFragment());
     }
 
     private String peMachineType(File file) {
@@ -470,40 +513,44 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         }
     }
 
-    private void launchGame(String path) {
+    public void launchGame(String path) {
+        File exe = new File(path);
+        if (!exe.isFile()) {
+            showMessage("Game not found", path + "\n\nThe file was moved or deleted. Remove this game from the library and import it again.");
+            return;
+        }
+
+        if (peMachineType(exe).startsWith("ARM64")) {
+            showMessage("Wrong version", "This is an ARM64 build of the game, which the engine can't run. Please use the 64-bit (x64) Windows version.");
+            return;
+        }
+
         Container container = null;
         for (Container c : (new ContainerManager(this)).getContainers()) {
             container = c;
             break;
         }
+
         if (container == null) {
-            showMessage("Import", "Create a container first (Containers tab, + button).");
+            new AlertDialog.Builder(this)
+                .setTitle("One-time setup")
+                .setMessage("Create the game environment first: tap the + button, then the \u2713 button, wait until it finishes, then press Back.")
+                .setPositiveButton("Open setup", (dialog, which) -> {
+                    showFragment(new ContainersFragment());
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
             return;
         }
 
-        final Container targetContainer = container;
-        final File exe = new File(path);
-        String info = "File: " + path +
-            "\nExists: " + exe.isFile() +
-            "\nSize: " + (exe.length() / 1024) + " KB" +
-            "\nType: " + peMachineType(exe) +
-            "\nContainer: " + container.id;
-
-        new AlertDialog.Builder(this)
-            .setTitle("Launching game")
-            .setMessage(info)
-            .setPositiveButton("Run", (dialog, which) -> {
-                try {
-                    Intent intent = new Intent(MainActivity.this, XServerDisplayActivity.class);
-                    intent.putExtra("container_id", targetContainer.id);
-                    intent.putExtra("exec_path", path);
-                    startActivity(intent);
-                }
-                catch (Throwable e) {
-                    showMessage("Launch error", String.valueOf(e));
-                }
-            })
-            .setNegativeButton("Cancel", null)
-            .show();
+        try {
+            Intent intent = new Intent(this, XServerDisplayActivity.class);
+            intent.putExtra("container_id", container.id);
+            intent.putExtra("exec_path", path);
+            startActivity(intent);
+        }
+        catch (Throwable e) {
+            showMessage("Launch error", String.valueOf(e));
+        }
     }
 }
